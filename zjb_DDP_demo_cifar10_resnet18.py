@@ -93,11 +93,12 @@ def main(rank, world_size):
             pbar.set_postfix(Loss=loss.item(),Epoch=epoch,Rank=rank)
         print(f"Rank {rank}, Epoch {epoch}, Loss: {loss.item()}")
         # 评估模型
-        accuracy = evaluate(model, rank, test_loader)
-        print(f"Rank {rank}, Test Accuracy: {accuracy}%")
+        if rank == 0 :
+            accuracy = evaluate(model, rank, test_loader)
+            print(f"Rank {rank}, Test Accuracy: {accuracy}%")
 
     cleanup()
 
 if __name__ == "__main__":
-    world_size = 4 #显卡数量
+    world_size = 4
     torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
