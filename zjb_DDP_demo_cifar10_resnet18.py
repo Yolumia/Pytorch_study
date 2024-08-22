@@ -5,12 +5,14 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Subset
 from torchvision.models import resnet18
-
+import wandb
+import numpy as np
+from tqdm import tqdm
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12357'
     torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
@@ -31,7 +33,15 @@ def evaluate(model, device, test_loader):
     return accuracy
 def main(rank, world_size):
     setup(rank, world_size)
-
+    # if rank==0:
+    #     wandb.init(
+    #         project="project-DDP-Cifar10",
+    #
+    #         # track hyperparameters and run metadata
+    #         config={
+    #             "learning_rate": 1e-3,
+    #         }
+    #     )
     # 数据变换
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -40,12 +50,26 @@ def main(rank, world_size):
 
     # 加载数据集
     train_set = torchvision.datasets.CIFAR10(root='/mnt/sda/zjb/data/cifar10', train=True, download=True, transform=transform)
-    train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank)
+    Downsampled_Sample = False #是否下采样数据
+    if Downsampled_Sample:
+        # 计算要抽取的样本数量（四分之一）
+        # 创建所有索引的列表
+        indices = list(range(len(train_set)))
+        split = int(np.floor(0.25 * len(train_set)))
+
+        # 取四分之一的随机索引
+        subset_indices = indices[:split]
+        subset=Subset(train_set,subset_indices)
+
+        train_sampler = DistributedSampler(subset, num_replicas=world_size, rank=rank)
+    else:
+        train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank)
+
     train_loader = DataLoader(train_set, batch_size=16, sampler=train_sampler)
 
     test_set = torchvision.datasets.CIFAR10(root='/mnt/sda/zjb/data/cifar10', train=False, download=True, transform=transform)
     test_sampler = DistributedSampler(test_set, num_replicas=world_size, rank=rank)
-    test_loader = DataLoader(test_set, batch_size=16, sampler=test_sampler)
+    test_loader = DataLoader(test_set, batch_size=64, sampler=test_sampler)
 
     # 模型定义
     model = resnet18(pretrained=False, num_classes=10).cuda(rank)
@@ -58,13 +82,15 @@ def main(rank, world_size):
     # 训练过程
     for epoch in range(10):
         model.train()
-        for data in train_loader:
+        pbar = tqdm(train_loader, desc="Training")
+        for data in pbar:
             inputs, labels = data[0].cuda(rank), data[1].cuda(rank)
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
+            pbar.set_postfix(Loss=loss.item(),Epoch=epoch,Rank=rank)
         print(f"Rank {rank}, Epoch {epoch}, Loss: {loss.item()}")
         # 评估模型
         accuracy = evaluate(model, rank, test_loader)
@@ -73,5 +99,5 @@ def main(rank, world_size):
     cleanup()
 
 if __name__ == "__main__":
-    world_size = 4
+    world_size = 4 #显卡数量
     torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)
